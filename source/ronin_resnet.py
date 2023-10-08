@@ -242,6 +242,31 @@ def train(args, **kwargs):
                     'epoch': total_epoch}, model_path)
         print('Checkpoint saved to ', model_path)
 
+
+        scripted_module = torch.jit.script(network)
+        # Export full jit version model (not compatible mobile interpreter), leave it here for comparison
+        scripted_module.save("checkpoint_latest_forexport.pt")
+        # Export mobile interpreter version model (compatible with mobile interpreter)
+        optimized_scripted_module = optimize_for_mobile(scripted_module)
+        optimized_scripted_module._save_for_lite_interpreter("checkpoint_latest_forexport.ptl")
+
+     #   model_path_for_pth = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pth')
+     #   torch.save(network.state_dict(), model_path_for_pth)
+      #  trained_model = Net()
+     #   trained_model.load_state_dict(torch.load(model_path_for_pth),strict=False)
+
+      #  #dummy_input = torch.autograd.Variable(torch.randn(64, 6, 7))
+       # dummy_input = torch.randn(64,6,7)
+      #  print(trained_model)
+      #  print(network)
+       # torch.onnx.export(network, dummy_input, 'ronin.onnx')
+       # torch.onnx.export(trained_model, dummy_input, "ronin.onnx")
+       # model = onnx.load('output/ronin.onnx')
+
+      # # Import the ONNX model to Tensorflow
+      #  tf_rep = prepare(model)
+       # tf_rep.export_graph('output/ronin.pb')
+
     return train_losses_all, val_losses_all
 
 

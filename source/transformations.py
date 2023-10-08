@@ -1,11 +1,12 @@
 import numpy as np
 import quaternion
 import math
+import warnings
 
-from numba import jit
+from numba import jit, njit
 from scipy.ndimage.filters import gaussian_filter1d
 
-
+warnings.simplefilter("ignore")
 @jit
 def change_cf(ori, vectors):
     """
@@ -92,7 +93,8 @@ class RandomHoriRotateSeq:
         self.i_f = input_format
         self.o_f = output_format
 
-    @jit
+    warnings.simplefilter("ignore")
+    @jit()
     def __call__(self, feature, target):
         a = np.random.random() * 2 * np.math.pi
         # print("Rotating by {} degrees", a/np.math.pi * 180)
