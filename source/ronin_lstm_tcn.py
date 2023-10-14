@@ -9,8 +9,8 @@ from shutil import copyfile
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.quantization.quantize import _observer_forward_hook
 from torch.utils.data import DataLoader
-
 
 from model_temporal import LSTMSeqNetwork, BilinearLSTMSeqNetwork, TCNSeqNetwork
 from utils import load_config, MSEAverageMeter
@@ -167,6 +167,7 @@ def train(args, **kwargs):
 
     global device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    print(device)
 
     if args.out_dir:
         if not osp.isdir(args.out_dir):
@@ -306,11 +307,18 @@ def train(args, **kwargs):
 
     print('Training completed')
     if args.out_dir:
-        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
-        torch.save({'model_state_dict': network.state_dict(),
-                    'epoch': epoch,
-                    'optimizer_state_dict': optimizer.state_dict()}, model_path)
-
+      #  model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
+      #  torch.save({'model_state_dict': network.state_dict(),
+      #              'epoch': epoch,
+      #              'optimizer_state_dict': optimizer.state_dict()}, model_path)
+          model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
+          torch.save({'model_state_dict': network.state_dict(),
+                      'optimizer_state_dict': optimizer.state_dict(),
+                      'epoch': epoch}, model_path)
+          print('Checkpoint saved to ', model_path)
+          model_scripted = torch.jit.script(network)  # Export to TorchScript
+          model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_jit_latest.pt')
+          model_scripted._save_for_lite_interpreter(model_path)
 
 def recon_traj_with_preds_global(dataset, preds, ind=None, seq_id=0, type='preds', **kwargs):
     ind = ind if ind is not None else np.array([i[1] for i in dataset.index_map if i[0] == seq_id], dtype=np.int)

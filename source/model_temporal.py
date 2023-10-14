@@ -2,6 +2,7 @@ import sys
 import os.path as osp
 
 import torch
+from torch import Tensor
 from torch.autograd import Variable
 
 from tcn import TemporalConvNet
@@ -36,8 +37,11 @@ class LSTMSeqNetwork(torch.nn.Module):
         self.linear2 = torch.nn.Linear(self.output_size*5, self.output_size)
         self.hidden = self.init_weights()
 
-    def forward(self, input, hidden=None):
-        output, self.hidden = self.lstm(input, self.init_weights())
+    def forward(self, input, hidden:Tensor=torch.empty(3,72,100)):
+        tup = self.lstm(input, self.init_weights())
+        output = tup[0]
+        self.hidden = tup[1]
+        #output, self.hidden = self.lstm(input, self.init_weights())
         output = self.linear1(output)
         output = self.linear2(output)
         return output
@@ -47,8 +51,8 @@ class LSTMSeqNetwork(torch.nn.Module):
         c0 = torch.zeros(self.num_layers, self.batch_size, self.lstm_size)
         h0 = h0.to(self.device)
         c0 = c0.to(self.device)
-        return Variable(h0), Variable(c0)
-
+        #return Variable(h0), Variable(c0)
+        return h0, c0
 
 class BilinearLSTMSeqNetwork(torch.nn.Module):
     def __init__(self, input_size, out_size, batch_size, device,
