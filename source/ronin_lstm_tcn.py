@@ -6,8 +6,11 @@ from os import path as osp
 from pathlib import Path
 from shutil import copyfile
 
+import onnx
+import tensorflow as tf
 import numpy as np
 import torch
+
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.quantization.quantize import _observer_forward_hook
 from torch.utils.data import DataLoader
@@ -17,7 +20,7 @@ from utils import load_config, MSEAverageMeter
 from data_glob_speed import GlobSpeedSequence, SequenceToSequenceDataset
 from transformations import ComposeTransform, RandomHoriRotateSeq
 from metric import compute_absolute_trajectory_error, compute_relative_trajectory_error
-
+from onnx_tf.backend import prepare
 '''
 Temporal models with loss functions in global coordinate frame
 Configurations
@@ -92,7 +95,8 @@ def get_dataset(root_dir, data_list, args, **kwargs):
     elif args.dataset == 'ridi':
         from data_ridi import RIDIGlobSpeedSequence
         seq_type = RIDIGlobSpeedSequence
-    dataset = SequenceToSequenceDataset(seq_type, root_dir, data_list, args.cache_path, args.step_size, args.window_size,
+    dataset = SequenceToSequenceDataset(seq_type, root_dir, data_list, args.cache_path, args.step_size,
+                                        args.window_size,
                                         random_shift=random_shift, transform=transforms, shuffle=shuffle,
                                         grv_only=grv_only, **kwargs)
 
@@ -307,18 +311,66 @@ def train(args, **kwargs):
 
     print('Training completed')
     if args.out_dir:
-      #  model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
-      #  torch.save({'model_state_dict': network.state_dict(),
-      #              'epoch': epoch,
-      #              'optimizer_state_dict': optimizer.state_dict()}, model_path)
-          model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
-          torch.save({'model_state_dict': network.state_dict(),
-                      'optimizer_state_dict': optimizer.state_dict(),
-                      'epoch': epoch}, model_path)
-          print('Checkpoint saved to ', model_path)
-          model_scripted = torch.jit.script(network)  # Export to TorchScript
-          model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_jit_latest.pt')
-          model_scripted._save_for_lite_interpreter(model_path)
+
+        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
+        torch.save({'model_state_dict': network.state_dict(),
+                      'epoch': epoch,
+                      'optimizer_state_dict': optimizer.state_dict()}, model_path)
+        model_path = osp.join(args.out_dir, 'checkpoints', 'final_network.pt')
+        torch.save(network, model_path)
+        print('Checkpoint saved to ', model_path)
+        network.device=torch.device('cpu')
+        network.to(torch.device('cpu'))
+        #print(network.device)
+        '''
+        tuple_hidden=network.hidden
+        tuple_of_tensors_on_cpu = tuple(tensor.to('cpu') for tensor in tuple_hidden)
+        #print(network.hidden)
+        network.hidden=tuple_of_tensors_on_cpu
+        #print(network.hidden)
+        print(next(network.parameters()).is_cuda)
+        #for name, param in network.named_parameters():
+        #    print(f"Layer: {name}, Device: {param.device}")
+        model_path = osp.join(args.out_dir, 'checkpoints', 'final_network_cpu.pt')
+        print('Checkpoint saved to ', model_path)
+        torch.save(network, model_path)
+        model_scripted = torch.jit.script(network)  # Export to TorchScript
+        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_jit_latest_light.pth')
+        model_scripted._save_for_lite_interpreter(model_path)
+        '''
+        sample_input = torch.randn((72,400,6)) #.tocuda()
+        torch.onnx.export(
+            network,  # PyTorch Model
+            sample_input,  # Input tensor
+            'model.onnx',
+            opset_version=12,
+            input_names=['input'],
+            output_names=['output']
+        )
+        model = onnx.load("output_model.onnx")
+        model_path = osp.join(args.out_dir, 'checkpoints', 'model.onnx')
+        torch.save(network, model_path)
+
+        # Check that the IR is well formed
+        onnx.checker.check_model(model)
+
+        # Print a Human readable representation of the graph
+        onnx.helper.printable_graph(model.graph)
+        onnx_model_path = 'model.onnx'
+        tf_model_path = osp.join(args.out_dir, 'checkpoints')
+        onnx_model = onnx.load(onnx_model_path)
+        tf_rep = prepare(onnx_model)
+        tf_rep.export_graph(tf_model_path)
+        print('Onnx saved to ', tf_model_path)
+      #  with open(tf_model_path, 'wb') as f:
+      #     f.write(onnx_model)
+        # Convert the model
+        converter = tf.lite.TFLiteConverter.from_saved_model(tf_model_path)
+        tflite_model = converter.convert()
+        tflite_model_path = osp.join(args.out_dir, 'checkpoints','checkpoint_latest.tflite')
+        # Save the model
+        with open(tflite_model_path, 'wb') as f:
+            f.write(tflite_model)
 
 def recon_traj_with_preds_global(dataset, preds, ind=None, seq_id=0, type='preds', **kwargs):
     ind = ind if ind is not None else np.array([i[1] for i in dataset.index_map if i[0] == seq_id], dtype=np.int)
@@ -508,7 +560,8 @@ if __name__ == '__main__':
     lstm_cmd.add_argument('--layers', type=int)
     lstm_cmd.add_argument('--layer_size', type=int)
 
-    mode = parser.add_subparsers(title='mode', dest='mode', help='Operation: [train] train model, [test] evaluate model')
+    mode = parser.add_subparsers(title='mode', dest='mode',
+                                 help='Operation: [train] train model, [test] evaluate model')
     mode.required = True
     # train
     train_cmd = mode.add_parser('train')

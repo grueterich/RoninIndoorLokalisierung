@@ -31,6 +31,7 @@ class LSTMSeqNetwork(torch.nn.Module):
         self.num_layers = lstm_layers
         self.batch_size = batch_size
         self.device = device
+        self.device = device
 
         self.lstm = torch.nn.LSTM(self.input_size, self.lstm_size, self.num_layers, batch_first=True, dropout=dropout)
         self.linear1 = torch.nn.Linear(self.lstm_size, self.output_size * 5)
@@ -52,6 +53,7 @@ class LSTMSeqNetwork(torch.nn.Module):
         h0 = h0.to(self.device)
         c0 = c0.to(self.device)
         #return Variable(h0), Variable(c0)
+
         return h0, c0
 
 class BilinearLSTMSeqNetwork(torch.nn.Module):

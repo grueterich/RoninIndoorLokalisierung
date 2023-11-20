@@ -45,8 +45,11 @@ class GlobSpeedSequence(CompiledSequence):
         with h5py.File(osp.join(data_path, 'data.hdf5')) as f:
             gyro_uncalib = f['synced/gyro_uncalib']
             acce_uncalib = f['synced/acce']
+            bias1=np.array(self.info['imu_init_gyro_bias'])
             gyro = gyro_uncalib - np.array(self.info['imu_init_gyro_bias'])
             acce = np.array(self.info['imu_acce_scale']) * (acce_uncalib - np.array(self.info['imu_acce_bias']))
+            bias2=np.array(self.info['imu_acce_scale'])
+            bias3=np.array(self.info['imu_acce_bias'])
             ts = np.copy(f['synced/time'])
             tango_pos = np.copy(f['pose/tango_pos'])
             init_tango_ori = quaternion.quaternion(*f['pose/tango_ori'][0])
@@ -55,11 +58,11 @@ class GlobSpeedSequence(CompiledSequence):
         ori_q = quaternion.from_float_array(ori)
         rot_imu_to_tango = quaternion.quaternion(*self.info['start_calibration'])
         init_rotor = init_tango_ori * rot_imu_to_tango * ori_q[0].conj()
+        bias4=ori_q[0].conj()
         ori_q = init_rotor * ori_q
 
         dt = (ts[self.w:] - ts[:-self.w])[:, None]
         glob_v = (tango_pos[self.w:] - tango_pos[:-self.w]) / dt
-
         gyro_q = quaternion.from_float_array(np.concatenate([np.zeros([gyro.shape[0], 1]), gyro], axis=1))
         acce_q = quaternion.from_float_array(np.concatenate([np.zeros([acce.shape[0], 1]), acce], axis=1))
         glob_gyro = quaternion.as_float_array(ori_q * gyro_q * ori_q.conj())[:, 1:]
