@@ -1,18 +1,19 @@
 import json
 import os
-import sys
 import time
 from os import path as osp
 from pathlib import Path
 from shutil import copyfile
 
-import onnx
+
 import tensorflow as tf
 import numpy as np
 import torch
+import torchvision
+import onnx
+from torch.utils.mobile_optimizer import optimize_for_mobile
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.quantization.quantize import _observer_forward_hook
 from torch.utils.data import DataLoader
 
 from model_temporal import LSTMSeqNetwork, BilinearLSTMSeqNetwork, TCNSeqNetwork
@@ -20,7 +21,7 @@ from utils import load_config, MSEAverageMeter
 from data_glob_speed import GlobSpeedSequence, SequenceToSequenceDataset
 from transformations import ComposeTransform, RandomHoriRotateSeq
 from metric import compute_absolute_trajectory_error, compute_relative_trajectory_error
-from onnx_tf.backend import prepare
+
 '''
 Temporal models with loss functions in global coordinate frame
 Configurations
@@ -311,34 +312,79 @@ def train(args, **kwargs):
 
     print('Training completed')
     if args.out_dir:
+        print(network)
+        parameter_names = [name for name, _ in network.named_parameters()]
 
+        # Print the first parameter name
+        if parameter_names:
+            print("First parameter:", parameter_names[0])
+        else:
+            print("Model has no parameters.")
+        #In the beginning we load an pretrained module, so we can try to bring it to cpu and then export it to mobile
+            ###### Pretrained
+            path_trained = osp.join(args.out_dir, 'checkpoints', 'ronin_lstm_checkpoint.pt')
+            network_pretrained = get_model(args, **kwargs).to(device)
+            checkpoints_pretrained = torch.load(path_trained, map_location='cuda:0')  # We have to load it from cuda
+            network_pretrained.load_state_dict(checkpoints_pretrained.get('model_state_dict'))
+            network_pretrained.eval()
+            network_pretrained.cpu()
+            network_pretrained_scripted = torch.jit.script(network_pretrained)  # Export to TorchScript
+            torch.save(network_pretrained_scripted, path_trained)
+            path_trained = osp.join(args.out_dir, 'checkpoints', 'ronin_lstm_checkpoint.ptl')
+            pretrainedscript = torch.jit.script(network_pretrained)
+            network_pretrained_optimized = optimize_for_mobile(pretrainedscript)
+            network_pretrained_optimized._save_for_lite_interpreter(path_trained)
+
+        ######
+
+
+        #We export our file as a pytroch file.
         model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
         torch.save({'model_state_dict': network.state_dict(),
-                      'epoch': epoch,
-                      'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                    'epoch': epoch,
+                    'optimizer_state_dict': optimizer.state_dict()}, model_path)
         model_path = osp.join(args.out_dir, 'checkpoints', 'final_network.pt')
+        network.device = torch.device('cpu')
+        network.to(torch.device('cpu'))
         torch.save(network, model_path)
         print('Checkpoint saved to ', model_path)
-        network.device=torch.device('cpu')
-        network.to(torch.device('cpu'))
-        #print(network.device)
-        '''
+        print(network.parameters())
+        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.ptl')
+
+        #using torch jit is crucial to be able to load it on mobile
+        networkscript=torch.jit.script(network)
+        network_optimized=optimize_for_mobile(networkscript)
+        network_optimized._save_for_lite_interpreter(model_path)
+        # print(network.device)
+
+        # Here we check if all the layers are on the cpu and even sett every hidden ladder to cpu, otherwise we cant use in android
         tuple_hidden=network.hidden
         tuple_of_tensors_on_cpu = tuple(tensor.to('cpu') for tensor in tuple_hidden)
-        #print(network.hidden)
+        print(network.hidden)
         network.hidden=tuple_of_tensors_on_cpu
-        #print(network.hidden)
+        print(network.hidden)
         print(next(network.parameters()).is_cuda)
-        #for name, param in network.named_parameters():
-        #    print(f"Layer: {name}, Device: {param.device}")
+        for name, param in network.named_parameters():
+            print(f"Layer: {name}, Device: {param.device}")
         model_path = osp.join(args.out_dir, 'checkpoints', 'final_network_cpu.pt')
         print('Checkpoint saved to ', model_path)
+        network.eval()
         torch.save(network, model_path)
         model_scripted = torch.jit.script(network)  # Export to TorchScript
-        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_jit_latest_light.pth')
+        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_jit_latest_light.ptl')
         model_scripted._save_for_lite_interpreter(model_path)
-        '''
-        sample_input = torch.randn((72,400,6)) #.tocuda()
+
+        #To convert the file to tflite, wefirst have to creat an onnx file
+
+        sample_input = torch.randn((72, 400, 6))  # .tocuda()
+        network.eval()
+        # sample_input= torch.randn(3,100,6)
+        onnx_path= osp.join(args.out_dir, 'checkpoints', 'model.onnx')
+        torch.onnx.export(network,sample_input,onnx_path)
+        onnx_model = onnx.load("model.onnx")
+        onnx.checker.check_model(onnx_model)
+
+        tf_model_path = 'model.pb'
         torch.onnx.export(
             network,  # PyTorch Model
             sample_input,  # Input tensor
@@ -347,30 +393,27 @@ def train(args, **kwargs):
             input_names=['input'],
             output_names=['output']
         )
-        model = onnx.load("output_model.onnx")
-        model_path = osp.join(args.out_dir, 'checkpoints', 'model.onnx')
-        torch.save(network, model_path)
 
-        # Check that the IR is well formed
-        onnx.checker.check_model(model)
-
-        # Print a Human readable representation of the graph
-        onnx.helper.printable_graph(model.graph)
-        onnx_model_path = 'model.onnx'
-        tf_model_path = osp.join(args.out_dir, 'checkpoints')
-        onnx_model = onnx.load(onnx_model_path)
-        tf_rep = prepare(onnx_model)
-        tf_rep.export_graph(tf_model_path)
-        print('Onnx saved to ', tf_model_path)
-      #  with open(tf_model_path, 'wb') as f:
-      #     f.write(onnx_model)
-        # Convert the model
+        #We take the onnx model and cn finaly convert it to tflite
         converter = tf.lite.TFLiteConverter.from_saved_model(tf_model_path)
         tflite_model = converter.convert()
-        tflite_model_path = osp.join(args.out_dir, 'checkpoints','checkpoint_latest.tflite')
-        # Save the model
-        with open(tflite_model_path, 'wb') as f:
+        tf_lite_model_path = osp.join(args.out_dir, 'checkpoints', 'model.tflite')
+
+        # We save a resnet model to see if it could be used instead of our other models
+        with open(tf_lite_model_path, 'wb') as f:
             f.write(tflite_model)
+
+        model2 = torchvision.models.mobilenet_v2(pretrained=True)
+        example_input = torch.rand(1, 3, 224, 224)  # Example input shape, adjust as needed
+        traced_script_module = torch.jit.trace(model2, example_input)
+        resnet_model_path = osp.join(args.out_dir, 'checkpoints', 'resnet.pt')
+        torch.jit.save(traced_script_module, resnet_model_path)
+        traced_script_module = torch.jit.load('resnet.pt')
+        traced_script_module_optimized = optimize_for_mobile(traced_script_module)
+        resnet_model_path = osp.join(args.out_dir, 'checkpoints', 'resnet_mobile.ptl')
+        torch.jit.script(network)._save_for_lite_interpreter(resnet_model_path)
+
+
 
 def recon_traj_with_preds_global(dataset, preds, ind=None, seq_id=0, type='preds', **kwargs):
     ind = ind if ind is not None else np.array([i[1] for i in dataset.index_map if i[0] == seq_id], dtype=np.int)
@@ -424,7 +467,7 @@ def test(args, **kwargs):
 
     network = get_model(args, **kwargs)
     network.load_state_dict(checkpoint.get('model_state_dict'))
-    network.eval().to(device)
+    # network.eval().to(device)
     print('Model {} loaded to device {}.'.format(args.model_path, device))
 
     log_file = None
@@ -598,7 +641,7 @@ if __name__ == '__main__':
     if args.mode == 'train':
         print(torch.cuda.is_available())
         print(torch.cuda.device_count())
-        print(torch.cuda.get_device_name(0))
+      # print(torch.cuda.get_device_name(0))
         train(args, **kwargs)
     elif args.mode == 'test':
         if not args.model_path:
